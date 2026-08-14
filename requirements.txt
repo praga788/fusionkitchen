@@ -1,0 +1,7 @@
+streamlit>=1.30.0
+gradio>=5.0
+pandas
+numpy
+pyarrow
+openai
+huggingface_hub>=0.20.0

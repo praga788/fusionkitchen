@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Your real API key — never commit this. api_key.py itself is safe (it
+# never contains a real secret, only the logic to find one) and always
+# stays tracked, so `import api_key` keeps working everywhere, including
+# on a deployed Hugging Face Space where this file won't exist at all.
+api_key_local.py
+
+# Your real pipeline data — large, and specific to your machine.
+# For deployment, these get uploaded to the Space directly (see README's
+# "Deploying to Hugging Face Spaces" section) rather than tracked here.
+data/*
+!data/README.md
+
+# Local environment
+.env
+venv/
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
