@@ -1,12 +1,11 @@
 """
-FusionKitchen — Data Loader
-=============================
-Loads all Step 1-4 pipeline artifacts once at startup. Everything the rest
-of the app needs is exposed as attributes on a single PipelineData object.
-
-If the real files aren't found, `PipelineData.is_real` is False and the UI
-layer falls back to demo_data.py automatically — the app never crashes
-just because a path is wrong, it just tells you so and keeps running.
+FusionKitchen — Data Loader (Memory-Optimized)
+==============================================
+Loads pipeline artifacts with minimal memory footprint:
+1. Memory-mapped numpy arrays for vectors (`mmap_mode='r'`).
+2. Efficient column loading for recipe lookup table.
+3. On-demand partitioned dataset querying for directions lookup
+   (zero RAM consumption for the 888MB directions corpus).
 """
 
 import os
@@ -22,13 +21,76 @@ def _load_embedding_table(path):
     (None, None) if the file doesn't exist."""
     if not os.path.exists(path):
         return None, None
-    vdf = pd.read_parquet(path)
-    dim_cols = [c for c in vdf.columns if c.startswith("dim_")]
-    terms = vdf["ingredient"].tolist()
-    matrix = vdf[dim_cols].to_numpy(dtype=np.float32)
-    norms = np.linalg.norm(matrix, axis=1, keepdims=True).clip(min=1e-8)
-    matrix = matrix / norms
-    return {t: i for i, t in enumerate(terms)}, matrix
+    try:
+        vdf = pd.read_parquet(path)
+        dim_cols = [c for c in vdf.columns if c.startswith("dim_")]
+        terms = vdf["ingredient"].tolist()
+        matrix = vdf[dim_cols].to_numpy(dtype=np.float32)
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True).clip(min=1e-8)
+        matrix = matrix / norms
+        return {t: i for i, t in enumerate(terms)}, matrix
+    except Exception as e:
+        print(f"[Warning] Failed loading embedding table {path}: {e}")
+        return None, None
+
+
+class DirectionsLookup:
+    """Zero-memory on-demand reader for directions_lookup.parquet.
+    Streams only the requested rows on demand rather than loading 2.2M text rows into RAM."""
+
+    def __init__(self, path):
+        self.path = path
+        self._cache = {}
+        self._dataset = None
+        self._df = None
+
+        if os.path.exists(path):
+            try:
+                import pyarrow.dataset as ds
+                self._dataset = ds.dataset(path, format="parquet")
+            except Exception as e:
+                print(f"[Warning] Could not initialize pyarrow dataset for directions: {e}")
+
+    def get(self, title: str, link: str):
+        key = (title, link)
+        if key in self._cache:
+            return self._cache[key]
+
+        # 1. Try PyArrow on-demand dataset filter (zero RAM)
+        if self._dataset is not None:
+            try:
+                import pyarrow.dataset as ds
+                expr = (ds.field("title") == title) & (ds.field("link") == link)
+                scanner = self._dataset.scanner(
+                    filter=expr,
+                    columns=["NER_clean_str", "ingredients_raw_text", "directions_text"]
+                )
+                tbl = scanner.to_table()
+                if tbl.num_rows > 0:
+                    res = {
+                        "NER_clean_str": tbl.column("NER_clean_str")[0].as_py() if "NER_clean_str" in tbl.column_names else "",
+                        "ingredients_raw_text": tbl.column("ingredients_raw_text")[0].as_py() if "ingredients_raw_text" in tbl.column_names else "",
+                        "directions_text": tbl.column("directions_text")[0].as_py() if "directions_text" in tbl.column_names else "",
+                    }
+                    self._cache[key] = res
+                    return res
+            except Exception:
+                pass
+
+        # 2. Fallback if dataset is a small in-memory df (e.g. in tests)
+        if self._df is not None and key in self._df.index:
+            row = self._df.loc[key]
+            if isinstance(row, pd.DataFrame):
+                row = row.iloc[0]
+            res = {
+                "NER_clean_str": str(row.get("NER_clean_str", "") or ""),
+                "ingredients_raw_text": str(row.get("ingredients_raw_text", "") or ""),
+                "directions_text": str(row.get("directions_text", "") or ""),
+            }
+            self._cache[key] = res
+            return res
+
+        return None
 
 
 class PipelineData:
@@ -54,9 +116,14 @@ class PipelineData:
             self._init_empty()
             return
 
-        print("Loading real pipeline artifacts...")
+        print("Loading real pipeline artifacts (memory-optimized)...")
 
-        self.recipe_lookup_df = pd.read_parquet(config.RECIPE_LOOKUP_PATH).reset_index(drop=True)
+        # Load recipe lookup table with only required columns
+        cols = ["title", "link", "source", "NER_text"]
+        try:
+            self.recipe_lookup_df = pd.read_parquet(config.RECIPE_LOOKUP_PATH, columns=cols).reset_index(drop=True)
+        except Exception:
+            self.recipe_lookup_df = pd.read_parquet(config.RECIPE_LOOKUP_PATH).reset_index(drop=True)
 
         # Use memory mapping for instant loading and minimal RAM usage
         self.recipe_vectors = {"word2vec": np.load(config.RECIPE_VECTORS_W2V_PATH, mmap_mode="r")}
@@ -78,13 +145,15 @@ class PipelineData:
         else:
             self.raw_to_canonical = {}
 
+        # Directions lookup — streaming on-demand to save ~4GB RAM
         if os.path.exists(config.DIRECTIONS_LOOKUP_PATH):
-            self.directions_df = pd.read_parquet(config.DIRECTIONS_LOOKUP_PATH).set_index(["title", "link"])
+            self.directions_lookup = DirectionsLookup(config.DIRECTIONS_LOOKUP_PATH)
+            self.directions_df = None  # Replaced by directions_lookup for zero memory usage
             self.have_directions = True
         else:
+            self.directions_lookup = None
             self.directions_df = None
             self.have_directions = False
-            print("  directions_lookup.parquet not found — GenAI prompts will use ingredients only, no full directions.")
 
         print(f"Loaded {len(self.recipe_lookup_df):,} recipes, "
               f"Word2Vec vocab {len(self.w2v_term_idx):,}, "
@@ -98,5 +167,6 @@ class PipelineData:
         self.have_sbert = False
         self.effective_alpha = config.ALPHA
         self.raw_to_canonical = {}
+        self.directions_lookup = None
         self.directions_df = None
         self.have_directions = False

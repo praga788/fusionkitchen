@@ -193,13 +193,19 @@ def enrich_with_genai(data, recommender: RecipeRecommender, recipe: dict, strict
     allergen_source_list = recommender.get_recipe_ingredients(recipe)
 
     if data.have_directions:
-        key = (recipe["title"], recipe["link"])
-        if key in data.directions_df.index:
-            row = data.directions_df.loc[key]
-            if isinstance(row, type(data.directions_df)):  # duplicate (title, link) -> DataFrame, not Series; take first
-                row = row.iloc[0]
-            ingredients_text = row.get("ingredients_raw_text", ingredients_text)
-            directions_text = row.get("directions_text", "")
+        if getattr(data, "directions_lookup", None) is not None:
+            row = data.directions_lookup.get(recipe.get("title", ""), recipe.get("link", ""))
+            if row:
+                ingredients_text = row.get("ingredients_raw_text") or ingredients_text
+                directions_text = row.get("directions_text") or ""
+        elif getattr(data, "directions_df", None) is not None:
+            key = (recipe["title"], recipe["link"])
+            if key in data.directions_df.index:
+                row = data.directions_df.loc[key]
+                if isinstance(row, type(data.directions_df)):  # duplicate (title, link) -> DataFrame, not Series; take first
+                    row = row.iloc[0]
+                ingredients_text = row.get("ingredients_raw_text", ingredients_text)
+                directions_text = row.get("directions_text", "")
 
     allergen_flags = flag_allergens(allergen_source_list)
 

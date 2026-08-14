@@ -1,6 +1,6 @@
 """
-FusionKitchen — Streamlit Application
-=====================================
+FusionKitchen — Streamlit Application (Memory-Optimized)
+========================================================
 Pulp-cinema / grindhouse styled ingredient recommendation web app.
 Connects to Hugging Face Datasets for the 5GB dataset storage.
 
@@ -11,6 +11,7 @@ Run locally:
 import os
 import html
 import functools
+import traceback
 import streamlit as st
 
 import config
@@ -244,22 +245,30 @@ st.markdown(STREAMLIT_CUSTOM_CSS, unsafe_allow_html=True)
 
 
 # -----------------------------------------------------------------------------
-# 2. Pipeline Loading with Resource Cache
+# 2. Pipeline Loading with Resource Cache & Error Handling
 # -----------------------------------------------------------------------------
 @st.cache_resource(show_spinner="Initializing pipeline & embeddings...")
 def load_pipeline():
-    # Sync Streamlit secrets to environment for API key and Dataset repo if present
+    # Sync Streamlit secrets to environment
     if hasattr(st, "secrets"):
         if "HF_DATASET_REPO" in st.secrets:
             os.environ["HF_DATASET_REPO"] = st.secrets["HF_DATASET_REPO"]
+            config.HF_DATASET_REPO = st.secrets["HF_DATASET_REPO"]
+        if "HF_TOKEN" in st.secrets:
+            os.environ["HF_TOKEN"] = st.secrets["HF_TOKEN"]
         if "OPENAI_API_KEY" in st.secrets:
             os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
         if "GEMINI_API_KEYS" in st.secrets:
             os.environ["GEMINI_API_KEYS"] = st.secrets["GEMINI_API_KEYS"]
 
-    data = PipelineData()
-    recommender = RecipeRecommender(data)
-    return data, recommender
+    try:
+        data = PipelineData()
+        recommender = RecipeRecommender(data)
+        return data, recommender, None
+    except Exception as e:
+        error_msg = f"Failed initializing pipeline: {e}\n{traceback.format_exc()}"
+        print(f"[Error] {error_msg}")
+        return None, None, error_msg
 
 
 # -----------------------------------------------------------------------------
@@ -313,7 +322,15 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    data, recommender = load_pipeline()
+    data, recommender, init_error = load_pipeline()
+
+    if init_error:
+        st.error("⚠️ Error initializing data pipeline:")
+        st.code(init_error)
+        if st.button("🔄 Retry Initializing"):
+            st.cache_resource.clear()
+            st.rerun()
+        return
 
     # Chapter 1: Ingredients Input
     st.markdown("""
@@ -340,7 +357,14 @@ def main():
 
     # Status Note
     if not data.is_real:
-        st.info("⚡ Running on DEMO DATA — upload your 5GB dataset to Hugging Face Dataset to activate the 2.2M recipe archive.")
+        st.info("⚡ Running on **DEMO DATA** — the real pipeline dataset was not found.")
+        with st.expander("🔍 Dataset Status & Diagnostics"):
+            repo = os.environ.get("HF_DATASET_REPO", config.HF_DATASET_REPO)
+            st.write(f"**Configured HF Dataset:** `https://huggingface.co/datasets/{repo}`")
+            st.write(f"**Checked File:** `{config.RECIPE_VECTORS_W2V_PATH}`")
+            if st.button("🔄 Download / Reload Dataset"):
+                st.cache_resource.clear()
+                st.rerun()
 
     # Chapter 2: The Lineup
     if find_button or ingredients_input:

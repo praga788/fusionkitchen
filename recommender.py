@@ -52,14 +52,22 @@ class RecipeRecommender:
         back to the naive space-split only if directions data isn't loaded.
         """
         if self.data.have_directions:
-            key = (recipe["title"], recipe["link"])
-            if key in self.data.directions_df.index:
-                row = self.data.directions_df.loc[key]
-                if isinstance(row, type(self.data.directions_df)):  # duplicate key -> DataFrame, take first
-                    row = row.iloc[0]
-                ner_clean_str = row.get("NER_clean_str")
-                if isinstance(ner_clean_str, str) and ner_clean_str.strip():
-                    return [t.strip() for t in ner_clean_str.split(";") if t.strip()]
+            # Check on-demand streaming lookup first
+            if getattr(self.data, "directions_lookup", None) is not None:
+                row = self.data.directions_lookup.get(recipe.get("title", ""), recipe.get("link", ""))
+                if row:
+                    ner_clean_str = row.get("NER_clean_str")
+                    if isinstance(ner_clean_str, str) and ner_clean_str.strip():
+                        return [t.strip() for t in ner_clean_str.split(";") if t.strip()]
+            elif getattr(self.data, "directions_df", None) is not None:
+                key = (recipe["title"], recipe["link"])
+                if key in self.data.directions_df.index:
+                    row = self.data.directions_df.loc[key]
+                    if isinstance(row, type(self.data.directions_df)):  # duplicate key -> DataFrame, take first
+                        row = row.iloc[0]
+                    ner_clean_str = row.get("NER_clean_str")
+                    if isinstance(ner_clean_str, str) and ner_clean_str.strip():
+                        return [t.strip() for t in ner_clean_str.split(";") if t.strip()]
         return [t for t in recipe.get("NER_text", "").split(" ") if t]
 
     def _canonicalize_query(self, user_ingredients):
